@@ -139,8 +139,8 @@ PrepareCopyRGA(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 
 	struct EXApixRGAimg *pImg;
 
-	DEBUG_MSG("RGA: %s: src = %p, dst = %p, alu = %s, "
-		"planemask = 0x%x, xdir = %d, ydir = %d", __func__, pSrc,
+	DEBUG_MSG("src = %p, dst = %p, alu = %s, "
+		"planemask = 0x%x, xdir = %d, ydir = %d", pSrc,
 		pDst, translate_gxop(alu), (unsigned int)planemask,
 		xdir, ydir);
 
@@ -196,8 +196,8 @@ CopyRGA(PixmapPtr pDstPixmap, int srcX, int srcY, int dstX, int dstY,
 			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
 	struct EXApixRGAimg *pRGA;
 
-	DEBUG_MSG("DEBUG: %s: dst = %p, src_x = %d, src_y = %d, "
-		"dst_x = %d, dst_y = %d, w = %d, h = %d", __func__, pDstPixmap,
+	DEBUG_MSG("dst = %p, src_x = %d, src_y = %d, "
+		"dst_x = %d, dst_y = %d, w = %d, h = %d", pDstPixmap,
 		srcX, srcY, dstX, dstY, width, height);
 
 /**
@@ -286,6 +286,31 @@ static Bool
 PrepareSolidRGA(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fill_colour)
 {
 #ifdef RGA_ENABLE_SOLID
+	ScrnInfoPtr pScrn = xf86ScreenToScrn(pPixmap->drawable.pScreen);
+	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
+	struct RockchipRGAEXARec *RGAExa = 
+			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
+
+	struct EXApixRGAimg *pImg;
+
+	if (pSrc->drawable.depth < 8)
+		goto fail;
+
+	if (alu != GXcopy)
+		goto fail;
+
+	if (planemask != 0xffffffff)
+		goto fail;
+
+	pImg = calloc(1, sizeof(struct EXApixRGAimg));
+
+	/* translate pSrc to rga_image */
+	pImg->pSrc = pPixmap;
+	pImg->pSrc.fill_color = fill_colour;
+	pImg->pSrc.color_mode = DRM_FORMAT_ARGB8888;
+
+fail:
+	return FALSE;
 #else
 	return FALSE;
 #endif
@@ -295,43 +320,22 @@ static void
 SolidRGA(PixmapPtr pPixmap, int x1, int y1, int x2, int y2)
 {
 #ifdef RGA_ENABLE_SOLID
-#if 0
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 	struct RockchipRGAEXARec *RGAExa = 
 			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
 
-	struct SolidG2DOp *solidOp;
+	struct EXApixRGAimg *pImg;
 	struct g2d_rect *rect;
 
-#if defined(EXA_G2D_DEBUG_SOLID)
-	EARLY_INFO_MSG("DEBUG: Solid2D: pixmap = %p, "
+	DEBUG_MSG("DEBUG: Solid2D: pixmap = %p, "
 		"x1 = %d, y1 = %d, x2 = %d, y2 = %d", pPixmap,
 		x1, y1, x2, y2);
-#endif
 
-	assert(RGAExa->current_op == g2d_exa_op_solid);
-
-	solidOp = RGAExa->priv;
+	pImg = RGAExa->priv;
 	
-	if (solidOp->num_rects == g2d_exa_solid_batch) {
-		// TODO: error handling
-		g2d_solid_fill_multi(RGAExa->g2d_ctx, &solidOp->dst, solidOp->rects, g2d_exa_solid_batch);
+	rga_solid_fill(RGAExa->rga_ctx, dst, 0, 0, dst->width, dst->height);
 
-		solidOp->num_rects = 0;
-	}
-
-	rect = &solidOp->rects[solidOp->num_rects];
-
-	assert(pPixmap == solidOp->pDst);
-
-	rect->x = x1;
-	rect->y = y1;
-	rect->w = x2 - x1;
-	rect->h = y2 - y1;
-
-	solidOp->num_rects++;
-#endif
 #endif
 }
 
