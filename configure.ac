@@ -24,7 +24,7 @@
 
 AC_PREREQ(2.60)
 AC_INIT([xf86-video-armsoc],
-        [1.1.0],
+        [1.4.0],
         [],
         [xf86-video-armsoc])
 AC_CONFIG_SRCDIR([Makefile.am])
@@ -69,15 +69,14 @@ PKG_CHECK_MODULES(XORG,
                   xproto
                   fontsproto
                   libdrm
-                  libdrm_rockchip
                   dri2proto
                   pixman-1
                   $REQUIRED_MODULES)
 
 PKG_CHECK_MODULES(XEXT, [xextproto >= 7.0.99.1],
-                  HAVE_XEXTPROTO_71="yes"; AC_DEFINE(HAVE_XEXTPROTO_71, 1, [xextproto 7.1 available]),
-                  HAVE_XEXTPROTO_71="no")
-AM_CONDITIONAL(HAVE_XEXTPROTO_71, [ test "$HAVE_XEXTPROTO_71" = "yes" ])
+	HAVE_XEXTPROTO_71="yes"; AC_DEFINE(HAVE_XEXTPROTO_71, 1, [xextproto 7.1 available]),
+	HAVE_XEXTPROTO_71="no")
+AM_CONDITIONAL(HAVE_XEXTPROTO_71, [ test "$HAVE_XEXTPROTO_71" = "yes"])
 
 # Checks for header files.
 AC_HEADER_STDC
