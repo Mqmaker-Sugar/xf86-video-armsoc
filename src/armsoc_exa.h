@@ -66,6 +66,7 @@ struct ARMSOCEXARec {
  * Fallback EXA implementation
  */
 struct ARMSOCEXARec *InitNullEXA(ScreenPtr pScreen, ScrnInfoPtr pScrn, int fd);
+struct ARMSOCEXARec * InitRockchipRGAEXA(ScreenPtr pScreen, ScrnInfoPtr pScrn, int fd);
 
 
 struct ARMSOCEXARec *ARMSOCEXAPTR(ScrnInfoPtr pScrn);

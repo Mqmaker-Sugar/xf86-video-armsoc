@@ -69,6 +69,7 @@ PKG_CHECK_MODULES(XORG,
                   xproto
                   fontsproto
                   libdrm
+                  libdrm_rockchip
                   dri2proto
                   pixman-1
                   $REQUIRED_MODULES)

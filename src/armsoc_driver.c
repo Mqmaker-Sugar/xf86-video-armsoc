@@ -957,6 +957,10 @@ ARMSOCAccelInit(ScreenPtr pScreen)
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 
 	if (!pARMSOC->pARMSOCEXA)
+		pARMSOC->pARMSOCEXA = InitRockchipRGAEXA(pScreen, pScrn,
+							pARMSOC->drmFD);
+
+	if (!pARMSOC->pARMSOCEXA)
 		pARMSOC->pARMSOCEXA = InitNullEXA(pScreen, pScrn,
 								pARMSOC->drmFD);
 
