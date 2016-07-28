@@ -38,10 +38,12 @@
 #include <libdrm/rockchip_drmif.h>
 #include <libdrm/rockchip_rga.h>
 #include <drm_fourcc.h>
+#include <xorg/fb.h>
 
 #include <time.h>
+#include <unistd.h>
 
-#undef RGA_ENABLE_COPY
+#define RGA_ENABLE_COPY
 #define RGA_ENABLE_SOLID
 #undef RGA_ENABLE_COMPOSITE
 
@@ -54,11 +56,15 @@
  */
 
 struct EXApixRGAimg {
-	PixmapPtr pSrc; 
+	PixmapPtr pSrc;
 	struct rga_image simg;
-	
+
 	PixmapPtr pDst;
 	struct rga_image dimg;
+
+ 	GCPtr pGC;
+	Bool reverse;
+	Bool upsidedown;
 };
 
 struct RockchipRGAEXARec {
@@ -122,6 +128,55 @@ translate_gxop(unsigned int op)
 	}
 }
 
+static unsigned int
+translate_pixmap_depth(PixmapPtr pPixmap)
+{
+	switch (pPixmap->drawable.depth) {
+    case 32:
+        return DRM_FORMAT_ARGB8888;
+
+    case 24:
+	if (pPixmap->drawable.bitsPerPixel == 32)
+		return DRM_FORMAT_XRGB8888;
+	else
+		return DRM_FORMAT_RGB888;
+
+    case 16:
+        return DRM_FORMAT_RGB565;
+
+    case 8:
+        return DRM_FORMAT_C8;
+
+    default:
+		assert(0);
+		return 0;
+    }
+}
+
+ static Bool
+ RGAIsSupport(PixmapPtr pPix, int Mask)
+ {
+ 	struct ARMSOCPixmapPrivRec *priv;
+
+ 	if(!pPix)
+		return TRUE;
+
+ 	if(Mask != -1)
+ 		return FALSE;
+
+ 	if (pPix->drawable.width < 34 || pPix->drawable.height < 34)
+ 		return FALSE;
+
+ 	if (pPix->drawable.depth != 32 && pPix->drawable.depth != 24)
+ 		return FALSE;
+
+ 	priv = exaGetPixmapDriverPrivate(pPix);
+ 	if(!priv->bo)
+ 		return FALSE;
+
+ 	return TRUE;
+ }
+
 
 static Bool
 PrepareCopyRGA(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
@@ -130,12 +185,12 @@ PrepareCopyRGA(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 #ifdef RGA_ENABLE_COPY
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pSrc->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
-	struct RockchipRGAEXARec *RGAExa = 
+	struct RockchipRGAEXARec *RGAExa =
 			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
 
 	struct ARMSOCPixmapPrivRec *privSrc = exaGetPixmapDriverPrivate(pSrc);
 	struct ARMSOCPixmapPrivRec *privDst = exaGetPixmapDriverPrivate(pDst);
-
+	ChangeGCVal gcval[2];
 
 	struct EXApixRGAimg *pImg;
 
@@ -144,42 +199,69 @@ PrepareCopyRGA(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 		pDst, translate_gxop(alu), (unsigned int)planemask,
 		xdir, ydir);
 
-	if (pSrc->drawable.depth < 8 || pDst->drawable.depth < 8)
-		goto fail;
+ 	if (!RGAIsSupport(pSrc, planemask) ||
+ 		!RGAIsSupport(pDst, planemask))
+		return FALSE;
 
 	if (alu != GXcopy)
-		goto fail;
-
-	if (planemask != 0xffffffff)
-		goto fail;
+		return FALSE;
 
 	pImg = calloc(1, sizeof(struct EXApixRGAimg));
 
 	/* translate pSrc to rga_image */
 	pImg->pSrc = pSrc;
 
-	pImg->simg.color_mode = DRM_FORMAT_ARGB8888;
+	/* Prepare GC configuration */
+	pImg->pGC = GetScratchGC(pDst->drawable.depth,
+			pDst->drawable.pScreen);
+	if (!pImg->pGC) {
+		free(pImg);
+		return FALSE;
+	}
+
+	gcval[0].val = alu;
+	gcval[1].val = planemask;
+	ChangeGC(NullClient, pImg->pGC, GCFunction | GCPlaneMask, gcval);
+	ValidateGC(&pDst->drawable, pImg->pGC);
+
+	pImg->simg.color_mode = translate_pixmap_depth(pSrc);
 	pImg->simg.width = pSrc->drawable.width;
 	pImg->simg.height = pSrc->drawable.height;
 	pImg->simg.stride = exaGetPixmapPitch(pSrc);
 	pImg->simg.buf_type = RGA_IMGBUF_GEM;
-	pImg->simg.bo[0] = armsoc_bo_handle(privSrc->bo);
+
+	ARMSOCRegisterExternalAccess(pSrc);
+	if (!ARMSOCPrepareAccess(pSrc, EXA_NUM_PREPARE_INDICES)) {
+		FreeScratchGC(pImg->pGC);
+		free(pImg);
+		return FALSE;
+	}
+	pImg->simg.bo[0] = armsoc_bo_dmabuf(privSrc->bo);
 
 	/* translate pDst to rga_image */
 	pImg->pDst = pDst;
-	pImg->dimg.color_mode = DRM_FORMAT_ARGB8888;
+	pImg->dimg.color_mode = translate_pixmap_depth(pDst);
 	pImg->dimg.width = pDst->drawable.width;
 	pImg->dimg.height = pDst->drawable.height;
 	pImg->dimg.stride = exaGetPixmapPitch(pDst);
 	pImg->dimg.buf_type = RGA_IMGBUF_GEM;
-	pImg->dimg.bo[0] = armsoc_bo_handle(privDst->bo);
+
+	ARMSOCRegisterExternalAccess(pDst);
+	if (!ARMSOCPrepareAccess(pDst, EXA_NUM_PREPARE_INDICES)) {
+		FreeScratchGC(pImg->pGC);
+		free(pImg);
+		return FALSE;
+	}
+
+	pImg->dimg.bo[0] = armsoc_bo_dmabuf(privDst->bo);
+
+	/* Record reverse & upsidedown, we maybe use it by cpu copying */
+	pImg->reverse = (xdir > 0 ? 0 : 1);
+	pImg->upsidedown = (ydir > 0 ? 0 : 1);
 
 	RGAExa->priv = (void *)pImg;
 
 	return TRUE;
-
-fail:
-	return FALSE;
 #else
 	return FALSE;
 #endif
@@ -192,42 +274,41 @@ CopyRGA(PixmapPtr pDstPixmap, int srcX, int srcY, int dstX, int dstY,
 #ifdef RGA_ENABLE_COPY
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pDstPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
-	struct RockchipRGAEXARec *RGAExa = 
+	struct RockchipRGAEXARec *RGAExa =
 			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
+
 	struct EXApixRGAimg *pRGA;
 
 	DEBUG_MSG("dst = %p, src_x = %d, src_y = %d, "
 		"dst_x = %d, dst_y = %d, w = %d, h = %d", pDstPixmap,
 		srcX, srcY, dstX, dstY, width, height);
 
-/**
- * rga_copy - copy contents in source buffer to destination buffer.
- *
- * @ctx: a pointer to rga_context structure.
- * @src: a pointer to rga_image structure including image and buffer
- *	information to source.
- * @dst: a pointer to rga_image structure including image and buffer
- *	information to destination.
- * @src_x: x start position to source buffer.
- * @src_y: y start position to source buffer.
- * @dst_x: x start position to destination buffer.
- * @dst_y: y start position to destination buffer.
- * @w: width value to source and destination buffers.
- * @h: height value to source and destination buffers.
- */
-	/*
-int rga_copy(struct rga_context *ctx, struct rga_image *src,
-	     struct rga_image *dst, unsigned int src_x, unsigned int src_y,
-	     unsigned int dst_x, unsigned dst_y, unsigned int w,
-	     unsigned int h)
-	*/
-
 	pRGA = RGAExa->priv;
 
-	rga_copy(RGAExa->rga_ctx, &pRGA->simg, &pRGA->dimg,
-			srcX, srcY, dstX, dstY, width, height);
+	/* If drawable is too small, we need to blt it by CPU */
+	if (width < 34 || height < 34) {
+		FbBits *src;
+		FbStride srcStride;
+		int srcBpp;
+		FbBits *dst;
+		FbStride dstStride;
+		int dstBpp;
 
-	rga_exec(RGAExa->rga_ctx);
+
+		DEBUG_MSG("[Debug_Sugar]: fbBlt by CPU............");
+		fbGetPixmapBitsData(pRGA->pSrc, src, srcStride, srcBpp);
+		fbGetPixmapBitsData(pRGA->pDst, dst, dstStride, dstBpp);
+
+		fbBlt(src + srcY * srcStride, srcStride, srcX * srcBpp,
+				dst + dstY * dstStride, dstStride, dstX * dstBpp,
+				width * dstBpp, height,
+				GXcopy, fbGetGCPrivate(pRGA->pGC)->pm,
+				dstBpp, pRGA->reverse, pRGA->upsidedown);
+	} else {
+		rga_copy(RGAExa->rga_ctx, &pRGA->simg, &pRGA->dimg,
+				srcX, srcY, dstX, dstY, width, height);
+		rga_exec(RGAExa->rga_ctx);
+	}
 #endif
 }
 
@@ -235,50 +316,23 @@ static void
 DoneCopyRGA(PixmapPtr pDstPixmap)
 {
 #ifdef RGA_ENABLE_COPY
-#if 0
+
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pDstPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
-	struct RockchipRGAEXARec *RGAExa = 
+	struct RockchipRGAEXARec *RGAExa =
 			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
-	struct CopyG2DOp *copyOp;
 
-#if defined(EXA_G2D_DEBUG_COPY)
-	EARLY_INFO_MSG("DEBUG: DoneCopyRGA: dst = %p", pDstPixmap);
-#endif
+	struct EXApixRGAimg *pImg = RGAExa->priv;
 
-	assert(RGAExa->current_op == g2d_exa_op_copy);
+	ARMSOCDeregisterExternalAccess(pImg->pSrc);
+	ARMSOCFinishAccess(pImg->pSrc, EXA_NUM_PREPARE_INDICES);
 
-	copyOp = RGAExa->priv;
+	ARMSOCDeregisterExternalAccess(pImg->pDst);
+	ARMSOCFinishAccess(pImg->pDst, EXA_NUM_PREPARE_INDICES);
 
-	assert(pDstPixmap == copyOp->pDst);
-
-	if (copyOp->num_rects == 0)
-		goto out;
-
-	// TODO: error handling
-	if (copyOp->flags & g2d_exa_copy_move)
-		g2d_move_multi(RGAExa->g2d_ctx, &copyOp->src,
-			copyOp->src_rects, copyOp->dst_rects, copyOp->num_rects);
-	else
-		g2d_copy_multi(RGAExa->g2d_ctx, &copyOp->src, &copyOp->dst,
-			copyOp->src_rects, copyOp->dst_rects, copyOp->num_rects);
-
-out:
-	g2d_exec(RGAExa->g2d_ctx);
-
-	if (copyOp->flags & g2d_exa_src_userptr)
-		userptr_unref(RGAExa, copyOp->pSrc);
-
-	if (copyOp->flags & g2d_exa_dst_userptr)
-		userptr_unref(RGAExa, pDstPixmap);
-
-	free(copyOp);
-
-	RGAExa->current_op = g2d_exa_op_unset;
+	FreeScratchGC(pImg->pGC);
+	free(pImg);
 	RGAExa->priv = NULL;
-	
-	rga_exec();
-#endif
 #endif
 }
 
@@ -288,32 +342,66 @@ PrepareSolidRGA(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fill_colour)
 #ifdef RGA_ENABLE_SOLID
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
-	struct RockchipRGAEXARec *RGAExa = 
+	struct RockchipRGAEXARec *RGAExa =
 			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
 
-	struct EXApixRGAimg *pImg;
+	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
 
-	if (pSrc->drawable.depth < 8)
-		goto fail;
+	struct EXApixRGAimg *pImg;
+ 	ChangeGCVal gcval[3];
+
+	DEBUG_MSG("RGA: pixmap = %p, alu = %s, "
+		"planemask = 0x%x color = 0x%x",
+		pPixmap, translate_gxop(alu),
+		(unsigned int)planemask, (unsigned int)fill_colour);
+
+	if (!RGAIsSupport(pPixmap, planemask))
+		return FALSE;
 
 	if (alu != GXcopy)
-		goto fail;
-
-	if (planemask != 0xffffffff)
-		goto fail;
+		return FALSE;
 
 	pImg = calloc(1, sizeof(struct EXApixRGAimg));
 
 	/* translate pSrc to rga_image */
-	pImg->pSrc = pPixmap;
-	pImg->pSrc.fill_color = fill_colour;
-	pImg->pSrc.color_mode = DRM_FORMAT_ARGB8888;
+	pImg->pDst = pPixmap;
+
+	pImg->dimg.fill_color = fill_colour;
+	pImg->dimg.color_mode = translate_pixmap_depth(pPixmap);
+	pImg->dimg.width = pPixmap->drawable.width;
+	pImg->dimg.height = pPixmap->drawable.height;
+	pImg->dimg.stride = exaGetPixmapPitch(pPixmap);
+	pImg->dimg.buf_type = RGA_IMGBUF_GEM;
+
+	ARMSOCRegisterExternalAccess(pPixmap);
+	if (!ARMSOCPrepareAccess(pPixmap, EXA_NUM_PREPARE_INDICES))
+		goto fail;
+
+	/* Set dma_buf fd */
+	pImg->dimg.bo[0] = armsoc_bo_dmabuf(pixPriv->bo);
+
+	/* Prepare GC configuration */
+	pImg->pGC = GetScratchGC(pPixmap->drawable.depth,
+			pPixmap->drawable.pScreen);
+	if (!pImg->pGC) {
+		ARMSOCFinishAccess(pPixmap, EXA_NUM_PREPARE_INDICES);
+		goto fail;
+	}
+
+ 	gcval[0].val = alu;
+ 	gcval[1].val = planemask;
+ 	gcval[2].val = fill_colour;
+ 	ChangeGC (NullClient, pImg->pGC, GCFunction|GCPlaneMask|GCForeground, gcval);
+ 	ValidateGC (&pPixmap->drawable, pImg->pGC);
+
+	RGAExa->priv = (void *)pImg;
+
+	return TRUE;
 
 fail:
-	return FALSE;
-#else
-	return FALSE;
+	free(pImg);
 #endif
+	return FALSE;
 }
 
 static void
@@ -322,20 +410,28 @@ SolidRGA(PixmapPtr pPixmap, int x1, int y1, int x2, int y2)
 #ifdef RGA_ENABLE_SOLID
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
-	struct RockchipRGAEXARec *RGAExa = 
+	struct RockchipRGAEXARec *RGAExa =
 			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
 
-	struct EXApixRGAimg *pImg;
-	struct g2d_rect *rect;
+	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
 
-	DEBUG_MSG("DEBUG: Solid2D: pixmap = %p, "
+	struct EXApixRGAimg *pImg;
+
+
+	DEBUG_MSG("RGA: pixmap = %p, "
 		"x1 = %d, y1 = %d, x2 = %d, y2 = %d", pPixmap,
 		x1, y1, x2, y2);
 
 	pImg = RGAExa->priv;
-	
-	rga_solid_fill(RGAExa->rga_ctx, dst, 0, 0, dst->width, dst->height);
 
+	if ((x2 - x1) < 34 || (y2 - y1) < 34) {
+		pPixmap->devPrivate.ptr  = armsoc_bo_map(pixPriv->bo);
+		fbFill(&pPixmap->drawable, pImg->pGC, x1, y1, x2 - x1, y2 - y1);
+		pPixmap->devPrivate.ptr  = NULL;
+	} else {
+		rga_solid_fill(RGAExa->rga_ctx, &pImg->dimg, x1, y1, x2 - x1, y2 - y1);
+		rga_exec(RGAExa->rga_ctx);
+	}
 #endif
 }
 
@@ -343,41 +439,18 @@ static void
 DoneSolidRGA(PixmapPtr pPixmap)
 {
 #ifdef RGA_ENABLE_SOLID
-#if 0
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
-	struct RockchipRGAEXARec *RGAExa = 
+	struct RockchipRGAEXARec *RGAExa =
 			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
 
-	struct SolidG2DOp *solidOp;
+	struct EXApixRGAimg *pImg = RGAExa->priv;
 
-#if defined(EXA_G2D_DEBUG_SOLID)
-	EARLY_INFO_MSG("DEBUG: DoneSolidRGA: pixmap = %p", pPixmap);
-#endif
-
-	assert(RGAExa->current_op == g2d_exa_op_solid);
-
-	solidOp = RGAExa->priv;
-
-	assert(pPixmap == solidOp->pDst);
-
-	if (solidOp->num_rects == 0)
-		goto out;
-
-	// TODO: error handling
-	g2d_solid_fill_multi(RGAExa->g2d_ctx, &solidOp->dst, solidOp->rects, solidOp->num_rects);
-
-out:
-	g2d_exec(RGAExa->g2d_ctx);
-
-	if (solidOp->flags & g2d_exa_dst_userptr)
-		userptr_unref(RGAExa, pPixmap);
-
-	free(solidOp);
-
-	RGAExa->current_op = g2d_exa_op_unset;
+	ARMSOCDeregisterExternalAccess(pPixmap);
+	ARMSOCFinishAccess(pPixmap, EXA_NUM_PREPARE_INDICES);
+	FreeScratchGC(pImg->pGC);
+	free(pImg);
 	RGAExa->priv = NULL;
-#endif
 #endif
 }
 

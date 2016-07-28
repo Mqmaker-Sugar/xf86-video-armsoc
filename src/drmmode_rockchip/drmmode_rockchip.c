@@ -46,6 +46,9 @@ struct drm_rockchip_gem_create {
 	uint32_t handle;
 };
 
+#define ROCKCHIP_BO_CONTIG (0 << 0)
+#define ROCKCHIP_BO_NONCONTIG (1 << 0)
+
 #define DRM_ROCKCHIP_GEM_CREATE 0x00
 #define DRM_IOCTL_ROCKCHIP_GEM_CREATE DRM_IOWR(DRM_COMMAND_BASE + \
 		DRM_ROCKCHIP_GEM_CREATE, struct drm_rockchip_gem_create)
@@ -80,6 +83,16 @@ static int create_custom_gem(int fd, struct armsoc_create_gem *create_gem)
 
 	assert((create_gem->buf_type == ARMSOC_BO_SCANOUT) ||
 			(create_gem->buf_type == ARMSOC_BO_NON_SCANOUT));
+
+	switch(create_gem->buf_type) {
+	case ARMSOC_BO_NON_SCANOUT:
+		create_rockchip.flags = ROCKCHIP_BO_NONCONTIG;
+		break;
+	case ARMSOC_BO_SCANOUT:
+	default:
+		create_rockchip.flags = ROCKCHIP_BO_CONTIG;
+		break;
+	}
 
 	ret = drmIoctl(fd, DRM_IOCTL_ROCKCHIP_GEM_CREATE, &create_rockchip);
 	if (ret)

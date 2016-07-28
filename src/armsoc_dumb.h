@@ -86,6 +86,7 @@ void armsoc_bo_unreference(struct armsoc_bo *bo);
 /* When dmabuf is set on a bo, armsoc_bo_cpu_prep()
  *  waits for KDS shared access
  */
+int armsoc_bo_dmabuf(struct armsoc_bo *bo);
 int armsoc_bo_set_dmabuf(struct armsoc_bo *bo);
 void armsoc_bo_clear_dmabuf(struct armsoc_bo *bo);
 int armsoc_bo_has_dmabuf(struct armsoc_bo *bo);

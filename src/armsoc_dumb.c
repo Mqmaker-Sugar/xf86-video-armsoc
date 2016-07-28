@@ -290,6 +290,12 @@ uint32_t armsoc_bo_pitch(struct armsoc_bo *bo)
 	return bo->pitch;
 }
 
+int armsoc_bo_dmabuf(struct armsoc_bo *bo)
+{
+	assert(bo->refcnt > 0);
+	return bo->dmabuf;
+}
+
 void *armsoc_bo_map(struct armsoc_bo *bo)
 {
 	assert(bo->refcnt > 0);
