@@ -43,9 +43,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define RGA_ENABLE_COPY
-#define RGA_ENABLE_SOLID
-#undef RGA_ENABLE_COMPOSITE
+#undef DEBUG_RGA
 
 
 /* This file has a trivial EXA implementation which accelerates nothing.  It
@@ -73,6 +71,7 @@ struct RockchipRGAEXARec {
 
 	/* add any other driver private data here.. */
 	struct rga_context *rga_ctx;
+	int cmd_list;
 
 	void *priv;
 };
@@ -87,6 +86,7 @@ RGAPrivFromPixmap(PixmapPtr pPixmap)
 }
 */
 
+#ifdef DEBUG_RGA
 static const char*
 translate_gxop(unsigned int op)
 {
@@ -127,6 +127,7 @@ translate_gxop(unsigned int op)
 		return "unknown GX operations";
 	}
 }
+#endif
 
 static unsigned int
 translate_pixmap_depth(PixmapPtr pPixmap)
@@ -182,7 +183,6 @@ static Bool
 PrepareCopyRGA(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 		int alu, Pixel planemask)
 {
-#ifdef RGA_ENABLE_COPY
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pSrc->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 	struct RockchipRGAEXARec *RGAExa =
@@ -194,10 +194,12 @@ PrepareCopyRGA(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 
 	struct EXApixRGAimg *pImg;
 
+#ifdef DEBUG_RGA
 	DEBUG_MSG("src = %p, dst = %p, alu = %s, "
 		"planemask = 0x%x, xdir = %d, ydir = %d", pSrc,
 		pDst, translate_gxop(alu), (unsigned int)planemask,
 		xdir, ydir);
+#endif
 
  	if (!RGAIsSupport(pSrc, planemask) ||
  		!RGAIsSupport(pDst, planemask))
@@ -262,16 +264,12 @@ PrepareCopyRGA(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 	RGAExa->priv = (void *)pImg;
 
 	return TRUE;
-#else
-	return FALSE;
-#endif
 }
 
 static void
 CopyRGA(PixmapPtr pDstPixmap, int srcX, int srcY, int dstX, int dstY,
 		int width, int height)
 {
-#ifdef RGA_ENABLE_COPY
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pDstPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 	struct RockchipRGAEXARec *RGAExa =
@@ -279,9 +277,11 @@ CopyRGA(PixmapPtr pDstPixmap, int srcX, int srcY, int dstX, int dstY,
 
 	struct EXApixRGAimg *pRGA;
 
+#ifdef DEBUG_RGA
 	DEBUG_MSG("dst = %p, src_x = %d, src_y = %d, "
 		"dst_x = %d, dst_y = %d, w = %d, h = %d", pDstPixmap,
 		srcX, srcY, dstX, dstY, width, height);
+#endif
 
 	pRGA = RGAExa->priv;
 
@@ -294,8 +294,11 @@ CopyRGA(PixmapPtr pDstPixmap, int srcX, int srcY, int dstX, int dstY,
 		FbStride dstStride;
 		int dstBpp;
 
+		if (RGAExa->cmd_list > 0) {
+			rga_exec(RGAExa->rga_ctx);
+			RGAExa->cmd_list = 0;
+		}
 
-		DEBUG_MSG("[Debug_Sugar]: fbBlt by CPU............");
 		fbGetPixmapBitsData(pRGA->pSrc, src, srcStride, srcBpp);
 		fbGetPixmapBitsData(pRGA->pDst, dst, dstStride, dstBpp);
 
@@ -307,22 +310,29 @@ CopyRGA(PixmapPtr pDstPixmap, int srcX, int srcY, int dstX, int dstY,
 	} else {
 		rga_copy(RGAExa->rga_ctx, &pRGA->simg, &pRGA->dimg,
 				srcX, srcY, dstX, dstY, width, height);
-		rga_exec(RGAExa->rga_ctx);
+		RGAExa->cmd_list++;
 	}
-#endif
+
+	if (RGAExa->cmd_list == 8) {
+		rga_exec(RGAExa->rga_ctx);
+		RGAExa->cmd_list = 0;
+	}
 }
 
 static void
 DoneCopyRGA(PixmapPtr pDstPixmap)
 {
-#ifdef RGA_ENABLE_COPY
-
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pDstPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 	struct RockchipRGAEXARec *RGAExa =
 			(struct RockchipRGAEXARec*)(pARMSOC->pARMSOCEXA);
 
 	struct EXApixRGAimg *pImg = RGAExa->priv;
+
+	if (RGAExa->cmd_list > 0) {
+		rga_exec(RGAExa->rga_ctx);
+		RGAExa->cmd_list = 0;
+	}
 
 	ARMSOCDeregisterExternalAccess(pImg->pSrc);
 	ARMSOCFinishAccess(pImg->pSrc, EXA_NUM_PREPARE_INDICES);
@@ -333,13 +343,11 @@ DoneCopyRGA(PixmapPtr pDstPixmap)
 	FreeScratchGC(pImg->pGC);
 	free(pImg);
 	RGAExa->priv = NULL;
-#endif
 }
 
 static Bool
 PrepareSolidRGA(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fill_colour)
 {
-#ifdef RGA_ENABLE_SOLID
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 	struct RockchipRGAEXARec *RGAExa =
@@ -350,10 +358,12 @@ PrepareSolidRGA(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fill_colour)
 	struct EXApixRGAimg *pImg;
  	ChangeGCVal gcval[3];
 
+#ifdef DEBUG_RGA
 	DEBUG_MSG("RGA: pixmap = %p, alu = %s, "
 		"planemask = 0x%x color = 0x%x",
 		pPixmap, translate_gxop(alu),
 		(unsigned int)planemask, (unsigned int)fill_colour);
+#endif
 
 	if (!RGAIsSupport(pPixmap, planemask))
 		return FALSE;
@@ -400,14 +410,12 @@ PrepareSolidRGA(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fill_colour)
 
 fail:
 	free(pImg);
-#endif
 	return FALSE;
 }
 
 static void
 SolidRGA(PixmapPtr pPixmap, int x1, int y1, int x2, int y2)
 {
-#ifdef RGA_ENABLE_SOLID
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 	struct RockchipRGAEXARec *RGAExa =
@@ -417,28 +425,37 @@ SolidRGA(PixmapPtr pPixmap, int x1, int y1, int x2, int y2)
 
 	struct EXApixRGAimg *pImg;
 
-
+#ifdef DEBUG_RGA
 	DEBUG_MSG("RGA: pixmap = %p, "
 		"x1 = %d, y1 = %d, x2 = %d, y2 = %d", pPixmap,
 		x1, y1, x2, y2);
+#endif
 
 	pImg = RGAExa->priv;
 
 	if ((x2 - x1) < 34 || (y2 - y1) < 34) {
+		if (RGAExa->cmd_list > 0) {
+			rga_exec(RGAExa->rga_ctx);
+			RGAExa->cmd_list = 0;
+		}
+
 		pPixmap->devPrivate.ptr  = armsoc_bo_map(pixPriv->bo);
 		fbFill(&pPixmap->drawable, pImg->pGC, x1, y1, x2 - x1, y2 - y1);
 		pPixmap->devPrivate.ptr  = NULL;
 	} else {
 		rga_solid_fill(RGAExa->rga_ctx, &pImg->dimg, x1, y1, x2 - x1, y2 - y1);
-		rga_exec(RGAExa->rga_ctx);
+		RGAExa->cmd_list++;
 	}
-#endif
+
+	if (RGAExa->cmd_list == 8) {
+		rga_exec(RGAExa->rga_ctx);
+		RGAExa->cmd_list = 0;
+	}
 }
 
 static void
 DoneSolidRGA(PixmapPtr pPixmap)
 {
-#ifdef RGA_ENABLE_SOLID
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pPixmap->drawable.pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 	struct RockchipRGAEXARec *RGAExa =
@@ -446,22 +463,23 @@ DoneSolidRGA(PixmapPtr pPixmap)
 
 	struct EXApixRGAimg *pImg = RGAExa->priv;
 
+	if (RGAExa->cmd_list > 0) {
+		rga_exec(RGAExa->rga_ctx);
+		RGAExa->cmd_list = 0;
+	}
+
 	ARMSOCDeregisterExternalAccess(pPixmap);
 	ARMSOCFinishAccess(pPixmap, EXA_NUM_PREPARE_INDICES);
 	FreeScratchGC(pImg->pGC);
 	free(pImg);
 	RGAExa->priv = NULL;
-#endif
 }
 
 static Bool
 CheckCompositeFail(int op, PicturePtr pSrcPicture, PicturePtr pMaskPicture,
 		PicturePtr pDstPicture)
 {
-#ifdef RGA_ENABLE_COMPOSITE
-#else
 	return FALSE;
-#endif
 }
 
 static Bool
@@ -469,10 +487,7 @@ PrepareCompositeFail(int op, PicturePtr pSrcPicture, PicturePtr pMaskPicture,
 		PicturePtr pDstPicture, PixmapPtr pSrc,
 		PixmapPtr pMask, PixmapPtr pDst)
 {
-#ifdef RGA_ENABLE_COMPOSITE
-#else
 	return FALSE;
-#endif
 }
 
 /**
